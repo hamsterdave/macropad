@@ -7,57 +7,72 @@
 
 #include <RPi_Pico_TimerInterrupt.h>
 #include <Adafruit_MCP23X17.h>
+#include <RotaryEncoder.h>
+#include <Mouse.h>
 #include <Wire.h>
 #include <Keyboard.h>
 #include <Adafruit_NeoPixel.h>
 
 #define TIMER0_INTERVAL_MS            20
 
-Adafruit_MCP23X17 mcp;
+//---Encoder---//
+RotaryEncoder encoder(PIN_ROTA, PIN_ROTB, RotaryEncoder::LatchMode::FOUR3);   ////Create Rotary Encoder, define pins, create ints
+void checkPosition() {  encoder.tick(); }     // just call tick() to check the state.
 
-// Init RPI_PICO_Timer, can use any from 0-15 pseudo-hardware timers
-RPI_PICO_Timer ITimer0(0);
+int encoder_pos = 0;    // our encoder position state
+
+volatile int encoder0Pos = 0;
+volatile int encoder0Prev = 0;
+volatile int encoder0Change = 0;
+
+
+//---Timer---//
+RPI_PICO_Timer ITimer0(0);    // Init RPI_PICO_Timer, can use any from 0-15 pseudo-hardware timers
 
 unsigned long timer0Stop = 0; //Time timer0 was stopped from millis()
-unsigned long timer0Time = 0; 
+unsigned long timer0Time = 0; //Current time check
 unsigned long timer0Diff = 0; //Time timer0 has been paused in mS
 
+
+//---Radio State Variables---//
 bool txFlag = false;  //Radio is transmitting
-bool escFlag = false; //Escape condition exists
+bool slice = 0;          //Which Slice is TX enabled? 0=A, 1=B
 
 
+//---MCP23017 GPIO Expansion objects and variables---//
+Adafruit_MCP23X17 mcp;    //Create MCP23017 GPIO Expansion board object
 bool mcpFlag = false; //New IO event on MCP
-int mcpBtn = 99;       //Pin MCP event happened on 
-int mcpBtnOld = 99;
+int mcpBtn = 99;       //Pin# MCP event happened on 
 
-bool keyFlag = false; //New IO event on Macropad
-bool keyChangeFlag = false; //Is the same key being held down?
-int keyNum = 99;      //Key Macropad event occurred on. 0 = encoder button, 1-12 = F keys
-
-int keyState = 0;     //TESTING KEY STATE COMPARE
-int keyStatus = 0;
-int keyStatusOld = 0;
-int keyWorking = 0;
-
-int mcpState = 0;
+int mcpState = 0;     //Stuff for determining MCP board key press (pins 0-3)
 int mcpStatus = 0;
 int mcpStatusOld = 0;
 int mcpWorking = 0;
 
-bool stopFlag = false; //Timer is paused
-int loopCount = 0;      //# of loops completed since the timer event was paused //USE TO TEST KEY ACTION DURATION
-
-bool slice = 0;          //Which Slice is TX enabled? 0=A, 1=B
-
-
-//TEST INPUTS ON MCP//
-bool testBtn4 = 0;    //txFlag SIM
+bool testBtn4 = 0;    //txFlag SIM      REMOVE WHEN PC INPUT AVAILABLE
 bool testBtn5 = 0;    //Active Slice SIM
 bool testbtn6 = 0;    //AVAILABLE
 bool testBtn7 = 0;    //AVAILABLE
 
 
-//---------------//
+//---Adafruit RP2040 Macropad variables---//
+bool keyFlag = false; //New IO event on Macropad
+int keyNum = 99;      //Key Macropad event occurred on. 0 = encoder button, 1-12 = F keys
+
+int keyState = 0;     //Stuff for determining macropad key pressed
+int keyStatus = 0;
+int keyStatusOld = 0;
+int keyWorking = 0;
+
+
+//---Misc Flags and Variables---//
+bool escFlag = false; //Escape condition exists
+bool stopFlag = false; //Timer is paused
+int loopCount = 0;      //# of loops completed since the timer event was paused //USE TO TEST KEY ACTION DURATION
+
+
+
+//-----------FUNCTIONS-------------//
 
 bool TimerHandler0(struct repeating_timer *t) {     //TIMER0 INTERRUPT ROUTINE that scans all IO pins for changes every 20mS. Timer is paused for 70mS after change //
   (void) t;
@@ -108,8 +123,8 @@ bool TimerHandler0(struct repeating_timer *t) {     //TIMER0 INTERRUPT ROUTINE t
   }
 
   if (keyFlag == true || mcpFlag == true || escFlag == true) {    //Stops timer for 50mS after key state change
-    timer0Stop = millis();
     ITimer0.stopTimer();
+    timer0Stop = millis();
     stopFlag = true;
   }
 
@@ -217,6 +232,7 @@ void keyAction() {            //Macropad key actions minus F12 (wipe)
 
 void wipeKey() {            //F12 (Wipe) key action
   Serial.println("wipeKey() Called");
+  Keyboard.write(KEY_F12);
   mcpStatus = 0;
 }
 
@@ -259,20 +275,29 @@ void setup() {              //SETUP FUNCTION
   Serial.begin(115200);     //Start Serial, Wire, Keyboard, Mouse//
   while (!Serial);
   Wire.begin();
+  Mouse.begin();
   Keyboard.begin();
 
-  if (!mcp.begin_I2C()) {      //Start I2C
+  if (!mcp.begin_I2C()) {      //Start I2C: COMMENT OUT IF NO MCP23017 BREAKOUT CONNECTED OR IT WILL HANG
     Serial.println("I2C Error");
     while (1);
   }
 
-  for (uint8_t i=0; i<=7; i++) {    //Configure I2C IO pin as active low inputs
+  for (uint8_t i=0; i<=7; i++) {    //Configure I2C IO pin as active low inputs: COMMENT OUT IF NO MCP23017
     mcp.pinMode(i, INPUT_PULLUP);
   }
 
   for (uint8_t i=0; i<=12; i++) {   //Configure macropad pins as active low inputs
     pinMode(i, INPUT_PULLUP);
   }
+
+  
+  pinMode(PIN_ROTA, INPUT_PULLUP);  //Setup Encoder Pins
+  pinMode(PIN_ROTB, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(2), checkPosition, CHANGE); //Setup Encoder interrupts
+  attachInterrupt(digitalPinToInterrupt(3), checkPosition, CHANGE);
+
 
   ITimer0.attachInterruptInterval(TIMER0_INTERVAL_MS * 1000, TimerHandler0);      //Begin Timer0
 
@@ -284,6 +309,22 @@ void loop() {
 
   if (keyFlag == true || mcpFlag == true) {   //If a key is struck
     keyDetect();
+  }
+
+  encoder.tick();                      // Check the encoder
+  int newPos = encoder.getPosition(); //If it changed position
+  if (encoder_pos != newPos) {
+    switch (encoder.getDirection()){  //Switch on getDirection and increment scroll wheel 1 in correct direction
+      case RotaryEncoder::Direction::NOROTATION:
+        break;
+      case RotaryEncoder::Direction::CLOCKWISE:
+        Mouse.move(0,0,-1);
+        break;
+      case RotaryEncoder::Direction::COUNTERCLOCKWISE:
+        Mouse.move(0,0,1);
+        break;
+    }
+    encoder_pos = newPos;
   }
 
 
