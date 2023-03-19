@@ -13,10 +13,15 @@
 #include <Keyboard.h>
 #include <Adafruit_NeoPixel.h>
 
-#define TIMER0_INTERVAL_MS            20
+#define TIMER0_INTERVAL_MS            20  //Polling rate for macropad and GPIO board keys; time in milliseconds
+
+//---NeoPixel---//
+Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NUM_NEOPIXEL, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);   // Create NeoPixel object and define pins
+
+int pixelNum = 0;
 
 //---Encoder---//
-RotaryEncoder encoder(PIN_ROTA, PIN_ROTB, RotaryEncoder::LatchMode::FOUR3);   ////Create Rotary Encoder, define pins, create ints
+RotaryEncoder encoder(PIN_ROTA, PIN_ROTB, RotaryEncoder::LatchMode::FOUR3);   //Create Rotary Encoder, define pins, create ints
 void checkPosition() {  encoder.tick(); }     // just call tick() to check the state.
 
 int encoder_pos = 0;    // our encoder position state
@@ -36,7 +41,14 @@ unsigned long timer0Diff = 0; //Time timer0 has been paused in mS
 
 //---Radio State Variables---//
 bool txFlag = false;  //Radio is transmitting
+bool txFlagOld = false;
+bool txFlagChange = false;
+
 bool slice = 0;          //Which Slice is TX enabled? 0=A, 1=B
+bool sliceOld = 0;
+bool sliceChangeFlag = 0;
+
+bool macroFlag = false;
 
 
 //---MCP23017 GPIO Expansion objects and variables---//
@@ -78,8 +90,22 @@ bool TimerHandler0(struct repeating_timer *t) {     //TIMER0 INTERRUPT ROUTINE t
   (void) t;
 
   //TEST INPUTS//
-  txFlag = !mcp.digitalRead(4);  //SIMULATED TX FLAG INPUT, REPLACE WITH INPUT FROM PC//
-  slice = !mcp.digitalRead(5);   //SIMULATED SLICE INPUT, REPLACE WITH INPUT FROM PC//
+  txFlagOld = txFlag;
+  txFlag = mcp.digitalRead(4);  //SIMULATED TX FLAG INPUT, REPLACE WITH INPUT FROM PC//
+  if (txFlagOld != txFlag) {
+    txFlagChange = true;
+  }
+  else {
+    txFlagChange = false;
+  }
+  sliceOld = slice;
+  slice = mcp.digitalRead(5);   //SIMULATED SLICE INPUT, REPLACE WITH INPUT FROM PC//
+  if (sliceOld != slice) {
+    sliceChangeFlag = true;
+  }
+  else {
+    sliceChangeFlag = false;
+  }
 
   for (int i=0; i<=3; i++) {        //Read IO Expansion pins into int mcpStatus
     mcpState = !mcp.digitalRead(i);
@@ -132,6 +158,33 @@ bool TimerHandler0(struct repeating_timer *t) {     //TIMER0 INTERRUPT ROUTINE t
 }
 
 //--------------//
+
+void neoPixelUpdate() {
+  if (keyNum > 0) {
+    pixelNum = keyNum - 1;
+  }
+  if (txFlag == true && macroFlag == false) {
+      for(int i=0; i< pixels.numPixels(); i++) {  //All keys red if no macro called & PTT flag = true
+        pixels.setPixelColor(i, 255, 0, 0);  
+      }
+  }
+  if (slice == 0 && txFlag == false) {
+    for(int i=0; i< pixels.numPixels(); i++) {  //All keys green for Slice A && txflag = false
+      pixels.setPixelColor(i, 0, 255, 0);  
+    }
+  }
+  if (slice == 1 && txFlag == false) {
+    for(int i=0; i< pixels.numPixels(); i++) {  //All keys green for Slice B & txflag = false
+      pixels.setPixelColor(i, 0, 0, 255);  
+    }
+  }
+  if (macroFlag == true){
+    pixels.setPixelColor(pixelNum, 255, 0, 0);
+  }
+  pixels.show();
+  sliceOld = slice;
+  sliceChangeFlag = false;
+}
 
 void keyDetect() {        //switches all IO pins to determine key state and calls appropriate key action function. MCP pins 4-7 are handled in timer interrupt
  
@@ -212,6 +265,18 @@ void keyDetect() {        //switches all IO pins to determine key state and call
 
 //---------------//
 
+void transmit() {
+  Serial.println("TRANSMIT");
+}
+
+//---------------//
+
+void flashKey() {
+  Serial.println("FLASH KEY");
+}
+
+//---------------//
+
 void escape() {       //Escape action, terminates current macro if txFlag = true when called
   escFlag = true;
   Keyboard.write(KEY_ESC);
@@ -225,6 +290,20 @@ void keyAction() {            //Macropad key actions minus F12 (wipe)
   Keyboard.write(193+keyNum);
   Serial.print(keyNum);
   Serial.println("Key");
+  macroFlag = true;
+  neoPixelUpdate();           //Comment out/remove when TX flag from PC is available. TESTING ONLY
+/*Keyboard.write(KEY_F13);    //Uncomment when TX flag from PC is available
+  delay(200);
+  if (txFlag == false) {
+    flashKey();
+  }
+  else {
+    transmit();
+  }
+*/
+  delay(500);                 //REMOVE THIS DELAY, TESTING ONLY
+  macroFlag = false;
+  neoPixelUpdate();
   keyStatus = 0;
 }
 
@@ -291,7 +370,14 @@ void setup() {              //SETUP FUNCTION
     pinMode(i, INPUT_PULLUP);
   }
 
-  
+  pixels.begin();                             //Setup NeoPixel
+  pixels.setBrightness(150);                  //Set intial key brightness 0-255
+  for(int i=0; i< pixels.numPixels(); i++) {  //All keys green for Slice A, blue for Slice B
+      pixels.setPixelColor(i, 0, 255, 0);  
+  }
+  pixels.show();
+
+
   pinMode(PIN_ROTA, INPUT_PULLUP);  //Setup Encoder Pins
   pinMode(PIN_ROTB, INPUT_PULLUP);
 
@@ -309,6 +395,10 @@ void loop() {
 
   if (keyFlag == true || mcpFlag == true) {   //If a key is struck
     keyDetect();
+  }
+
+  if (sliceChangeFlag == true) {
+   neoPixelUpdate();
   }
 
   encoder.tick();                      // Check the encoder
